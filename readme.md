@@ -1,18 +1,19 @@
 # xordump
 
-Made for use with Atomic RedTeam.
+Made for use with Atomic Red Team.
 
 ```
 Usage of xordump.exe:
   -in string
         Input file to Xor
+  -m string
+        [ dbghelp | dbgcore | comsvcs ] (default "dbghelp")
   -out string
         minidump outfile (default "minidump.dmp")
   -p string
         Process to dump (default "lsass.exe")
-  -x int 
-        Single Byte Xor Key (default 0x00)
-
+  -x int
+        Single Byte Xor Key
 ```
 
 In some cases, lsass.exe minidump files are signatured by AV and deleted. It's not
@@ -29,7 +30,7 @@ function which then re-writes the xor'd data to disk, where it can be safely exf
 
 **OPSEC consideration** If you lose the race, AV may see the dumpfile and say something.
 
-miniDump and seDebug code swiped from Merlin C2, written by @C-Sto
+Part of the miniDump and seDebug code written by @C-Sto
 
 ## Building / Usage
 
