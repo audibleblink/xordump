@@ -34,5 +34,6 @@ Part of the miniDump and seDebug code written by @C-Sto
 
 ## Building / Usage
 
-Running `make` should build the windows exe and the shellcode that can be injected. Go 1.15+ is
-required because of the additional PIE (position independence) flag introduced.
+Running `make` should build the windows exe and the shellcode that can be injected. Go 1.16+ is
+required because of the additional PIE (position independence) flag introduced in 1.15 and `ioutil`
+deprecation in 1.16.
