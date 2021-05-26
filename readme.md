@@ -10,8 +10,10 @@ Usage of xordump.exe:
         [ dbghelp | dbgcore | comsvcs ] (default "dbghelp")
   -out string
         minidump outfile (default "minidump.dmp")
-  -p string
+  -process string
         Process to dump (default "lsass.exe")
+  -pid int
+        PID of process. Takes precedence over --process
   -x int
         Single Byte Xor Key
 ```
