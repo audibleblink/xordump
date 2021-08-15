@@ -7,8 +7,6 @@ import (
 	"os"
 	"syscall"
 	"unsafe"
-
-	"golang.org/x/sys/windows"
 )
 
 const (
@@ -117,18 +115,16 @@ func dbgDumper(pid uint32, dll string) (mini []byte, err error) {
 	}
 	defer os.Remove(f.Name())
 
-	// BOOL MiniDumpWriteDump(
-	//   HANDLE                            hProcess,
-	//   DWORD                             ProcessId,
-	//   HANDLE                            hFile,
-	//   MINIDUMP_TYPE                     DumpType,
-	//   PMINIDUMP_EXCEPTION_INFORMATION   ExceptionParam,
-	//   PMINIDUMP_USER_STREAM_INFORMATION UserStreamParam,
-	//   PMINIDUMP_CALLBACK_INFORMATION    CallbackParam
-	// );
-	dbgDll := windows.NewLazySystemDLL(dll)
-	miniDump := dbgDll.NewProc("MiniDumpWriteDump")
-	r, _, _ := miniDump.Call(uintptr(hProc), uintptr(uint32(pid)), f.Fd(), 3, 0, 0, 0)
+	miniDump := windows.NewLazySystemDLL(dll).NewProc("MiniDumpWriteDump")
+	r, _, _ := miniDump.Call(
+		uintptr(hProc),       //hProcess,
+		uintptr(uint32(pid)), //ProcessId
+		f.Fd(),               //fFile
+		3,                    //DumpType
+		0,                    //ExceptionParam
+		0,                    //UserStreamParam
+		0,                    //CallbackParam
+	)
 	f.Close() //idk why this fixes the 'not same as on disk' issue, but it does
 	if r != 0 {
 		mini, err = os.ReadFile(f.Name())
@@ -199,60 +195,4 @@ func getProcess(name string, pid uint32) (uint32, error) {
 		}
 	}
 	return 0, fmt.Errorf("could not find a procces with the supplied name \"%s\" or PID of \"%d\"", name, pid)
-}
-
-func sePrivEnable(s string) error {
-	type LUID struct {
-		LowPart  uint32
-		HighPart int32
-	}
-	type LUID_AND_ATTRIBUTES struct {
-		Luid       LUID
-		Attributes uint32
-	}
-	type TOKEN_PRIVILEGES struct {
-		PrivilegeCount uint32
-		Privileges     [1]LUID_AND_ATTRIBUTES
-	}
-
-	modadvapi32 := windows.NewLazySystemDLL("advapi32.dll")
-	procAdjustTokenPrivileges := modadvapi32.NewProc("AdjustTokenPrivileges")
-
-	procLookupPriv := modadvapi32.NewProc("LookupPrivilegeValueW")
-	var tokenHandle syscall.Token
-	thsHandle, err := syscall.GetCurrentProcess()
-	if err != nil {
-		return err
-	}
-	syscall.OpenProcessToken(
-		thsHandle,                       //  HANDLE  ProcessHandle,
-		syscall.TOKEN_ADJUST_PRIVILEGES, //	DWORD   DesiredAccess,
-		&tokenHandle,                    //	PHANDLE TokenHandle
-	)
-	var luid LUID
-	r, _, e := procLookupPriv.Call(
-		uintptr(0), //LPCWSTR lpSystemName,
-		uintptr(unsafe.Pointer(syscall.StringToUTF16Ptr(s))), //LPCWSTR lpName,
-		uintptr(unsafe.Pointer(&luid)),                       //PLUID   lpLuid
-	)
-	if r == 0 {
-		return e
-	}
-	SE_PRIVILEGE_ENABLED := uint32(TH32CS_SNAPPROCESS)
-	privs := TOKEN_PRIVILEGES{}
-	privs.PrivilegeCount = 1
-	privs.Privileges[0].Luid = luid
-	privs.Privileges[0].Attributes = SE_PRIVILEGE_ENABLED
-	r, _, e = procAdjustTokenPrivileges.Call(
-		uintptr(tokenHandle),
-		uintptr(0),
-		uintptr(unsafe.Pointer(&privs)),
-		uintptr(0),
-		uintptr(0),
-		uintptr(0),
-	)
-	if r == 0 {
-		return e
-	}
-	return nil
 }
